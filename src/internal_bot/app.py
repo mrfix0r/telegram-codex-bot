@@ -143,7 +143,9 @@ class BotApplication:
             )
             return
 
-        self.client.answer_callback_query(callback_id)
+        is_thread_selection = data.startswith("thread:")
+        if not is_thread_selection:
+            self.client.answer_callback_query(callback_id)
         try:
             response, reply_markup = self.dispatch_callback(data, chat_id)
         except CodexError as exc:
@@ -152,6 +154,13 @@ class BotApplication:
             LOG.exception("Ошибка обработки кнопки")
             response = "Действие завершилось внутренней ошибкой. Подробности записаны в лог."
             reply_markup = main_keyboard()
+        if is_thread_selection:
+            failed = response.startswith("Codex:") or response.startswith("Действие завершилось")
+            self.client.answer_callback_query(
+                callback_id,
+                response[:200] if failed else "Задача выбрана.",
+                show_alert=failed,
+            )
         self.client.send_message(chat_id, response, reply_markup=reply_markup)
 
     def dispatch_callback(self, data: str, chat_id: int) -> tuple[str, ReplyMarkup]:
@@ -168,6 +177,8 @@ class BotApplication:
             return HELP_TEXT, main_keyboard()
         if data == "show:status":
             return self.dispatch("/codex_status", chat_id), main_keyboard()
+        if data == "show:overall_status":
+            return self.dispatch("/codex_threads", chat_id), main_keyboard()
         if data == "show:threads":
             return self._show_thread_picker(chat_id)
         if data == "action:stop":
@@ -309,7 +320,10 @@ class BotApplication:
             if not args:
                 return "Использование: /codex_use ID"
             status = self.codex.use_thread(chat_id, args)
-            return f"Задача Codex подключена.\nThread ID: {status.thread_id}"
+            return (
+                "Задача Codex выбрана. Теперь можно направить ей новый запрос.\n"
+                f"Thread ID: {status.thread_id}"
+            )
         raise CodexError("неизвестная команда")
 
     @staticmethod

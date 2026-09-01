@@ -7,7 +7,12 @@ import unittest
 from unittest.mock import patch
 from typing import Any, Callable
 
-from internal_bot.codex import CodexManager, resolve_codex_executable
+from internal_bot.codex import (
+    CodexBusyError,
+    CodexError,
+    CodexManager,
+    resolve_codex_executable,
+)
 from internal_bot.storage import Storage
 
 
@@ -39,6 +44,7 @@ class FakeRpc:
         self.closed = False
         self.turn_number = 0
         self.complete_during_turn_start = False
+        self.resume_error: CodexError | None = None
 
     def set_handler(self, handler: Callable[[dict[str, Any]], None]) -> None:
         self.handler = handler
@@ -54,6 +60,8 @@ class FakeRpc:
         if method == "thread/start":
             return {"thread": {"id": "thr_12345678901234567890"}}
         if method == "thread/resume":
+            if self.resume_error is not None:
+                raise self.resume_error
             return {"thread": {"id": params["threadId"]}}
         if method == "turn/start":
             self.turn_number += 1
@@ -139,7 +147,7 @@ class CodexManagerTests(unittest.TestCase):
             executable="codex",
             workspace=self.root,
             model=None,
-            approval_policy="unlessTrusted",
+            approval_policy="on-request",
             request_timeout=5,
             rpc=self.rpc,
         )
@@ -251,10 +259,31 @@ class CodexManagerTests(unittest.TestCase):
         threads = self.manager.list_threads()
         self.assertEqual(threads[0].name, "Telegram bot")
 
+        requests_before_selection = len(self.rpc.requests)
         status = self.manager.use_thread(10, "thr_123")
 
         self.assertEqual(status.thread_id, "thr_12345678901234567890")
-        self.assertEqual(self.rpc.requests[-1][0], "thread/resume")
+        self.assertEqual(
+            [method for method, _ in self.rpc.requests[requests_before_selection:]],
+            ["thread/list"],
+        )
+
+        self.manager.continue_task(10, "Продолжай")
+
+        resume_requests = [
+            params for method, params in self.rpc.requests if method == "thread/resume"
+        ]
+        self.assertEqual(resume_requests[-1]["approvalPolicy"], "on-request")
+        self.assertEqual(resume_requests[-1]["sandbox"], "workspace-write")
+
+    def test_active_writer_has_friendly_error(self) -> None:
+        self.rpc.resume_error = CodexError(
+            "Codex App Server (thread/resume): thread already has an active writer"
+        )
+        self.manager.use_thread(10, "thr_12345678901234567890")
+
+        with self.assertRaisesRegex(CodexBusyError, "другом экземпляре Codex"):
+            self.manager.continue_task(10, "Продолжай")
 
 
 if __name__ == "__main__":

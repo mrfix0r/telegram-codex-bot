@@ -45,6 +45,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_shortcuts.ps1
 
 Основные действия доступны как кнопки под сообщениями бота. Нажмите `/start`, выберите действие и отправьте текст, когда бот его запросит. Для выбора существующей задачи больше не нужно копировать Thread ID — достаточно нажать нужную задачу в списке. Запросы разрешений Codex также приходят с кнопками подтверждения и отказа.
 
+Кнопка «Статус по задаче» показывает состояние выбранной задачи (`/codex_status`), а «Общий статус» открывает список последних задач (`/codex_threads`). Выбор задачи сохраняется сразу и не мешает держать её открытой в Codex Desktop. При отправке нового запроса задача подключается к боту; если в этот момент она всё ещё открыта в другом экземпляре Codex, сначала закройте её там или выберите другую задачу.
+
 Это кнопочный интерфейс Telegram-бота, а не Mini App: отдельный сайт и HTTPS-хостинг ему не нужны. Текстовые команды сохранены как резервный способ управления.
 
 ```text
@@ -80,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_shortcuts.ps1
 
 ## Безопасность
 
-Бот использует локальный `codex app-server` по stdio и не открывает сетевой порт. По умолчанию действует политика подтверждений `unlessTrusted`: потенциально опасные действия требуют ответа в Telegram. Используйте `/codex_approve session` только тогда, когда готовы разрешить аналогичные действия до конца текущей сессии.
+Бот использует локальный `codex app-server` по stdio и не открывает сетевой порт. По умолчанию действует политика подтверждений `on-request`: потенциально опасные действия требуют ответа в Telegram. Используйте `/codex_approve session` только тогда, когда готовы разрешить аналогичные действия до конца текущей сессии.
 
 Доступ проверяется одновременно по `TELEGRAM_OWNER_IDS` и, если заполнено, по `TELEGRAM_ALLOWED_CHAT_IDS`.
 
@@ -92,7 +94,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_shortcuts.ps1
 BOT_CODEX_EXECUTABLE=codex
 BOT_CODEX_WORKSPACE=.
 BOT_CODEX_MODEL=
-BOT_CODEX_APPROVAL_POLICY=unlessTrusted
+BOT_CODEX_APPROVAL_POLICY=on-request
 BOT_CODEX_REQUEST_TIMEOUT=30
 ```
 

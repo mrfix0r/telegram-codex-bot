@@ -18,6 +18,16 @@ def callbacks(markup: dict[str, object]) -> list[str]:
 
 
 class UiTests(unittest.TestCase):
+    def test_status_buttons_have_expected_labels(self) -> None:
+        labels = {
+            button["callback_data"]: button["text"]
+            for row in main_keyboard()["inline_keyboard"]
+            for button in row
+        }
+
+        self.assertEqual(labels["show:status"], "📊 Статус по задаче")
+        self.assertEqual(labels["show:overall_status"], "🩺 Общий статус")
+
     def test_all_callback_data_fits_telegram_limit(self) -> None:
         markups = [
             main_keyboard(),

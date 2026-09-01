@@ -25,9 +25,10 @@ def main_keyboard() -> ReplyMarkup:
                 button("▶️ Запустить / продолжить", "prompt:codex", style="primary"),
                 button("🆕 Новая задача", "prompt:codex_new", style="primary"),
             ],
+            [button("💬 Направить задачу", "prompt:codex_reply")],
             [
-                button("💬 Направить задачу", "prompt:codex_reply"),
-                button("📊 Статус", "show:status"),
+                button("📊 Статус по задаче", "show:status"),
+                button("🩺 Общий статус", "show:overall_status"),
             ],
             [
                 button("🗂 Выбрать задачу", "show:threads"),

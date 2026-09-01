@@ -60,7 +60,9 @@ class TelegramClientTests(unittest.TestCase):
     @patch("internal_bot.telegram.urlopen", return_value=FakeResponse())
     def test_send_message_attaches_inline_keyboard(self, mocked_urlopen: Mock) -> None:
         markup = {
-            "inline_keyboard": [[{"text": "Статус", "callback_data": "show:status"}]]
+            "inline_keyboard": [
+                [{"text": "Статус по задаче", "callback_data": "show:status"}]
+            ]
         }
         TelegramClient("test-token").send_message(10, "Меню", reply_markup=markup)
 

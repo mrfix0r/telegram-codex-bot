@@ -394,7 +394,7 @@ class CodexManager:
         params: dict[str, Any] = {
             "cwd": str(self.workspace),
             "approvalPolicy": self.approval_policy,
-            "sandbox": "workspaceWrite",
+            "sandbox": "workspace-write",
             "serviceName": "telegram_internal_tool",
         }
         if self.model:
@@ -417,11 +417,24 @@ class CodexManager:
         self._persist(session)
         return session
 
+    def _request_thread_resume(self, thread_id: str) -> Any:
+        try:
+            return self._rpc.request(
+                "thread/resume",
+                {"threadId": thread_id, **self._thread_params()},
+            )
+        except CodexError as exc:
+            if "active writer" in str(exc).lower():
+                raise CodexBusyError(
+                    "Эта задача уже открыта в другом экземпляре Codex. "
+                    "Закройте её там и попробуйте снова либо выберите другую задачу."
+                ) from exc
+            raise
+
     def _resume_session(self, session: _Session) -> _Session:
         if session.loaded:
             return session
-        params = {"threadId": session.thread_id, **self._thread_params()}
-        result = self._rpc.request("thread/resume", params)
+        result = self._request_thread_resume(session.thread_id)
         thread = result.get("thread", {}) if isinstance(result, dict) else {}
         thread_id = thread.get("id")
         if not isinstance(thread_id, str) or not thread_id:
@@ -561,20 +574,15 @@ class CodexManager:
                 if len(matches) != 1:
                     raise CodexError("Короткий ID не найден или неоднозначен; используйте полный ID")
                 value = matches[0]
-            result = self._rpc.request(
-                "thread/resume", {"threadId": value, **self._thread_params()}
-            )
-            thread = result.get("thread", {}) if isinstance(result, dict) else {}
-            thread_id = thread.get("id")
-            if not isinstance(thread_id, str) or not thread_id:
-                raise CodexError("Не удалось подключить задачу Codex")
-            session = _Session(chat_id=chat_id, thread_id=thread_id, loaded=True)
+            # Выбор задачи не должен занимать её в App Server: задача может быть
+            # открыта в Codex Desktop. Возобновляем её только при новом запросе.
+            session = _Session(chat_id=chat_id, thread_id=value, loaded=False)
             with self._lock:
                 previous = self._sessions.get(chat_id)
                 if previous is not None:
                     self._thread_to_chat.pop(previous.thread_id, None)
                 self._sessions[chat_id] = session
-                self._thread_to_chat[thread_id] = chat_id
+                self._thread_to_chat[value] = chat_id
             self._persist(session)
             return self.status(chat_id)
 

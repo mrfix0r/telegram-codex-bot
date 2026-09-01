@@ -103,12 +103,11 @@ class AppConfig:
         if not codex_executable:
             raise ConfigError("BOT_CODEX_EXECUTABLE не может быть пустым")
         approval_policy = os.environ.get(
-            "BOT_CODEX_APPROVAL_POLICY", "unlessTrusted"
+            "BOT_CODEX_APPROVAL_POLICY", "on-request"
         ).strip()
         allowed_approval_policies = {
-            "unlessTrusted",
             "on-request",
-            "on-failure",
+            "granular",
             "never",
             "untrusted",
         }

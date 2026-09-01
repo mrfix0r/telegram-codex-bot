@@ -27,7 +27,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.token, "test:secret-token")
             self.assertEqual(config.owner_ids, frozenset({7}))
             self.assertTrue(config.codex_enabled)
-            self.assertEqual(config.codex_approval_policy, "unlessTrusted")
+            self.assertEqual(config.codex_approval_policy, "on-request")
 
     def test_process_environment_has_priority_over_secret_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

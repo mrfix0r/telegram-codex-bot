@@ -77,7 +77,7 @@ class AppTests(unittest.TestCase):
             codex_executable="codex",
             codex_workspace=root,
             codex_model=None,
-            codex_approval_policy="unlessTrusted",
+            codex_approval_policy="on-request",
             codex_request_timeout=5,
         )
         self.client = FakeClient()
@@ -174,7 +174,14 @@ class AppTests(unittest.TestCase):
         )
 
         self.assertEqual(self.codex.used, [(10, "thr_old")])
-        self.assertIn("подключена", self.client.messages[-1][1])
+        self.assertEqual(self.client.callback_answers[-1], ("cb_use", "Задача выбрана.", False))
+        self.assertIn("выбрана", self.client.messages[-1][1])
+
+    def test_overall_status_button_runs_codex_threads(self) -> None:
+        response, _ = self.app.dispatch_callback("show:overall_status", 10)
+
+        self.assertIn("Последние задачи Codex", response)
+        self.assertIn("thr_old", response)
 
     def test_rejects_button_from_unknown_user(self) -> None:
         self.app.handle_update(

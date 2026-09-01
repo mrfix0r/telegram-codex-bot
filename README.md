@@ -31,6 +31,16 @@ python bot.py
 
 После запуска отправьте `/start`. Файл с токеном исключён из Git. Переменная окружения `TELEGRAM_BOT_TOKEN`, если она задана, имеет приоритет над локальным секретом.
 
+## Запуск вместе с Windows
+
+Установщик создаёт ярлыки `Codex Telegram Bot` и `Stop Codex Telegram Bot` на рабочем столе, а также добавляет запуск бота в автозагрузку текущего пользователя:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_shortcuts.ps1
+```
+
+Бот запускается со скрытым окном. Повторный запуск через ярлык не создаёт второй процесс. Логи находятся в `data/bot.log`, служебные сообщения запуска — в `data/launcher.log`.
+
 ## Команды
 
 ```text

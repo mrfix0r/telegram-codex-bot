@@ -97,10 +97,17 @@ class AppTests(unittest.TestCase):
         )
         self.client = FakeClient()
         self.codex = FakeCodex()
+        self.desktop_refresh_calls = 0
+
+        def refresh_desktop() -> str:
+            self.desktop_refresh_calls += 1
+            return "Codex Desktop перезапущен."
+
         self.app = BotApplication(
             self.config,
             self.client,  # type: ignore[arg-type]
             self.codex,  # type: ignore[arg-type]
+            desktop_refresh=refresh_desktop,
         )
 
     def tearDown(self) -> None:
@@ -219,6 +226,24 @@ class AppTests(unittest.TestCase):
             markup["inline_keyboard"][2][0]["text"],
             "3. Google Drive — проанализируй последние…",
         )
+
+    def test_desktop_refresh_requires_confirmation(self) -> None:
+        response, markup = self.app.dispatch_callback("desktop:refresh", 10)
+
+        self.assertIn("могут прерваться", response)
+        self.assertEqual(self.desktop_refresh_calls, 0)
+        callbacks = [
+            button["callback_data"]
+            for row in markup["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn("desktop:refresh_confirm", callbacks)
+
+    def test_desktop_refresh_runs_after_confirmation(self) -> None:
+        response, _ = self.app.dispatch_callback("desktop:refresh_confirm", 10)
+
+        self.assertEqual(response, "Codex Desktop перезапущен.")
+        self.assertEqual(self.desktop_refresh_calls, 1)
 
     def test_rejects_button_from_unknown_user(self) -> None:
         self.app.handle_update(

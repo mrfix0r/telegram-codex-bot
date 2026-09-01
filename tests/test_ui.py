@@ -2,6 +2,7 @@ import unittest
 
 from internal_bot.ui import (
     approval_keyboard,
+    desktop_refresh_keyboard,
     main_keyboard,
     notification_keyboard,
     thread_keyboard,
@@ -32,6 +33,7 @@ class UiTests(unittest.TestCase):
         markups = [
             main_keyboard(),
             approval_keyboard(),
+            desktop_refresh_keyboard(),
             thread_keyboard(["Очень длинное название задачи " * 10 for _ in range(20)]),
         ]
 
@@ -44,6 +46,13 @@ class UiTests(unittest.TestCase):
 
         self.assertIn("approve:once", callbacks(markup))
         self.assertIn("approve:decline", callbacks(markup))
+
+    def test_main_menu_has_desktop_refresh_button(self) -> None:
+        self.assertIn("desktop:refresh", callbacks(main_keyboard()))
+        self.assertIn(
+            "desktop:refresh_confirm",
+            callbacks(desktop_refresh_keyboard()),
+        )
 
 
 if __name__ == "__main__":

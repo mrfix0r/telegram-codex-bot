@@ -143,11 +143,13 @@ class CodexAppServerClient:
             self._process = process
             threading.Thread(
                 target=self._read_stdout,
+                args=(process,),
                 name="codex-app-server-reader",
                 daemon=True,
             ).start()
             threading.Thread(
                 target=self._read_stderr,
+                args=(process,),
                 name="codex-app-server-stderr",
                 daemon=True,
             ).start()
@@ -214,9 +216,8 @@ class CodexAppServerClient:
             except (BrokenPipeError, OSError) as exc:
                 raise CodexError("Соединение с Codex App Server закрыто") from exc
 
-    def _read_stdout(self) -> None:
-        process = self._process
-        if process is None or process.stdout is None:
+    def _read_stdout(self, process: subprocess.Popen[str]) -> None:
+        if process.stdout is None:
             return
         try:
             for raw_line in process.stdout:
@@ -252,7 +253,7 @@ class CodexAppServerClient:
                         "message": f"Codex App Server завершился с кодом {exit_code}"
                     }
                     pending.event.set()
-            if not self._closing:
+            if self._process is process and not self._closing:
                 try:
                     self._handler(
                         {
@@ -263,9 +264,8 @@ class CodexAppServerClient:
                 except Exception:
                     LOG.exception("Ошибка обработки остановки Codex App Server")
 
-    def _read_stderr(self) -> None:
-        process = self._process
-        if process is None or process.stderr is None:
+    def _read_stderr(self, process: subprocess.Popen[str]) -> None:
+        if process.stderr is None:
             return
         for line in process.stderr:
             value = line.rstrip()
@@ -354,6 +354,9 @@ class CodexManager:
         self.approval_policy = approval_policy
         self._lock = threading.RLock()
         self._operations = threading.RLock()
+        self._release_lock = threading.Lock()
+        self._release_generation = 0
+        self._release_scheduled = False
         self._sessions: dict[int, _Session] = {}
         self._thread_to_chat: dict[str, int] = {}
         self._rpc: RpcTransport = rpc or CodexAppServerClient(
@@ -495,17 +498,29 @@ class CodexManager:
             session.last_error = ""
             session.output.clear()
             session.pending.clear()
-        result = self._rpc.request(
-            "turn/start",
-            {
-                "threadId": session.thread_id,
-                "input": [{"type": "text", "text": prompt}],
-            },
-        )
-        turn = result.get("turn", {}) if isinstance(result, dict) else {}
-        turn_id = turn.get("id")
-        if not isinstance(turn_id, str) or not turn_id:
-            raise CodexError("Codex App Server не вернул ID запуска")
+        try:
+            result = self._rpc.request(
+                "turn/start",
+                {
+                    "threadId": session.thread_id,
+                    "input": [{"type": "text", "text": prompt}],
+                },
+            )
+            turn = result.get("turn", {}) if isinstance(result, dict) else {}
+            turn_id = turn.get("id")
+            if not isinstance(turn_id, str) or not turn_id:
+                raise CodexError("Codex App Server не вернул ID запуска")
+        except Exception as exc:
+            with self._lock:
+                if session.status == "starting":
+                    session.status = "failed"
+                    session.turn_id = None
+                    session.last_error = str(exc)
+                    session.output.clear()
+                    session.pending.clear()
+            self._persist(session)
+            self._schedule_app_server_release()
+            raise
         with self._lock:
             # Быстрый turn может завершиться в reader-потоке до обработки ответа.
             # В этом случае не затираем уже полученный терминальный статус.
@@ -798,6 +813,48 @@ class CodexManager:
             if error_message:
                 text += "\n" + str(error_message)
         self._notify(session.chat_id, text)
+        self._schedule_app_server_release()
+
+    def _schedule_app_server_release(self) -> None:
+        """Освобождает writer-lock задач после завершения последнего turn."""
+        with self._release_lock:
+            self._release_generation += 1
+            if self._release_scheduled:
+                return
+            self._release_scheduled = True
+        threading.Thread(
+            target=self._release_app_server_when_idle,
+            name="codex-app-server-release",
+            daemon=True,
+        ).start()
+
+    def _release_app_server_when_idle(self) -> None:
+        try:
+            while True:
+                with self._release_lock:
+                    generation = self._release_generation
+                with self._operations:
+                    with self._lock:
+                        active = any(
+                            item.status in {"starting", "inProgress"} or item.pending
+                            for item in self._sessions.values()
+                        )
+                        if not active:
+                            for item in self._sessions.values():
+                                item.loaded = False
+                    if not active:
+                        self._rpc.close()
+                        LOG.info(
+                            "Codex App Server остановлен: завершённые задачи доступны в Desktop"
+                        )
+                with self._release_lock:
+                    if generation == self._release_generation:
+                        self._release_scheduled = False
+                        return
+        except Exception:
+            LOG.exception("Не удалось освободить Codex App Server")
+            with self._release_lock:
+                self._release_scheduled = False
 
     @staticmethod
     def _format_pending_request(request: _PendingServerRequest) -> str:
@@ -852,4 +909,8 @@ class CodexManager:
             LOG.exception("Не удалось отправить уведомление Codex в Telegram")
 
     def close(self) -> None:
-        self._rpc.close()
+        with self._operations:
+            with self._lock:
+                for session in self._sessions.values():
+                    session.loaded = False
+            self._rpc.close()

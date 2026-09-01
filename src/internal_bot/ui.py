@@ -34,6 +34,7 @@ def main_keyboard() -> ReplyMarkup:
                 button("🗂 Выбрать задачу", "show:threads"),
                 button("⏹ Остановить", "action:stop"),
             ],
+            [button("🔄 Обновить Codex Desktop", "desktop:refresh")],
             [button("ℹ️ Помощь", "show:help")],
         ]
     }
@@ -57,6 +58,21 @@ def approval_keyboard() -> ReplyMarkup:
             ],
             [button("❌ Отклонить", "approve:decline", style="danger")],
             [button("Главное меню", "show:menu")],
+        ]
+    }
+
+
+def desktop_refresh_keyboard() -> ReplyMarkup:
+    return {
+        "inline_keyboard": [
+            [
+                button(
+                    "Перезапустить Codex Desktop",
+                    "desktop:refresh_confirm",
+                    style="danger",
+                )
+            ],
+            [button("Отмена", "show:menu")],
         ]
     }
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from typing import Any, Callable
@@ -42,6 +44,9 @@ class FakeRpc:
         self.errors: list[tuple[Any, int, str]] = []
         self.started = False
         self.closed = False
+        self.close_count = 0
+        self.close_event = threading.Event()
+        self.thread_number = 0
         self.turn_number = 0
         self.complete_during_turn_start = False
         self.resume_error: CodexError | None = None
@@ -51,6 +56,8 @@ class FakeRpc:
 
     def start(self) -> None:
         self.started = True
+        self.closed = False
+        self.close_event.clear()
 
     def request(
         self, method: str, params: dict[str, Any], timeout: int | None = None
@@ -58,7 +65,13 @@ class FakeRpc:
         self.started = True
         self.requests.append((method, params))
         if method == "thread/start":
-            return {"thread": {"id": "thr_12345678901234567890"}}
+            self.thread_number += 1
+            thread_id = (
+                "thr_12345678901234567890"
+                if self.thread_number == 1
+                else f"thr_1234567890123456789{self.thread_number}"
+            )
+            return {"thread": {"id": thread_id}}
         if method == "thread/resume":
             if self.resume_error is not None:
                 raise self.resume_error
@@ -131,6 +144,8 @@ class FakeRpc:
 
     def close(self) -> None:
         self.closed = True
+        self.close_count += 1
+        self.close_event.set()
 
 
 class CodexManagerTests(unittest.TestCase):
@@ -155,6 +170,15 @@ class CodexManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.manager.close()
         self.temp.cleanup()
+
+    def wait_for_release_worker(self) -> None:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            with self.manager._release_lock:
+                if not self.manager._release_scheduled:
+                    return
+            time.sleep(0.01)
+        self.fail("Поток освобождения Codex App Server не завершился")
 
     def test_starts_turn_and_delivers_final_answer(self) -> None:
         status = self.manager.start_task(10, "Проверь проект")
@@ -202,6 +226,55 @@ class CodexManagerTests(unittest.TestCase):
 
         self.assertEqual(status.status, "completed")
         self.assertEqual(status.last_response, "Быстрый ответ")
+
+    def test_releases_app_server_and_resumes_thread_after_completion(self) -> None:
+        status = self.manager.start_task(10, "Проверь проект")
+        self.rpc.emit(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": status.thread_id,
+                    "turn": {"id": "turn_1", "status": "completed", "items": []},
+                },
+            }
+        )
+
+        self.assertTrue(self.rpc.close_event.wait(1))
+        self.assertEqual(self.rpc.close_count, 1)
+
+        self.manager.continue_task(10, "Продолжай")
+
+        methods = [method for method, _ in self.rpc.requests]
+        self.assertEqual(methods[-2:], ["thread/resume", "turn/start"])
+
+    def test_keeps_app_server_while_another_turn_is_active(self) -> None:
+        first = self.manager.start_task(10, "Первая задача")
+        second = self.manager.start_task(11, "Вторая задача")
+
+        self.rpc.emit(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": first.thread_id,
+                    "turn": {"id": "turn_1", "status": "completed", "items": []},
+                },
+            }
+        )
+        self.wait_for_release_worker()
+        self.assertEqual(self.rpc.close_count, 0)
+
+        self.rpc.emit(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": second.thread_id,
+                    "turn": {"id": "turn_2", "status": "completed", "items": []},
+                },
+            }
+        )
+
+        self.assertTrue(self.rpc.close_event.wait(1))
+        self.assertEqual(self.rpc.close_count, 1)
 
     def test_stop_interrupts_active_turn(self) -> None:
         self.manager.start_task(10, "Начни")

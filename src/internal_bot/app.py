@@ -3,15 +3,17 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .codex import CodexError, CodexManager, CodexStatus, CodexThreadSummary
 from .config import AppConfig
+from .desktop import DesktopRefreshError, refresh_codex_desktop
 from .storage import Storage
 from .telegram import TelegramClient, TelegramConnectionError, TelegramError
 from .ui import (
     ReplyMarkup,
     cancel_keyboard,
+    desktop_refresh_keyboard,
     main_keyboard,
     notification_keyboard,
     thread_keyboard,
@@ -30,6 +32,8 @@ RAW_URL_RE = re.compile(r"(?:plugin|app|https?)://\S+", re.IGNORECASE)
 HELP_TEXT = """Управление Codex через Telegram.
 
 Выберите действие кнопкой под сообщением. Текст задачи бот запросит следующим сообщением.
+
+Кнопка «Обновить Codex Desktop» перезапускает приложение после подтверждения.
 
 /codex запрос — создать или продолжить задачу Codex
 /codex_new запрос — создать новую задачу Codex
@@ -72,10 +76,12 @@ class BotApplication:
         config: AppConfig,
         client: TelegramClient,
         codex: CodexManager | None = None,
+        desktop_refresh: Callable[[], str] | None = None,
     ) -> None:
         self.config = config
         self.client = client
         self.codex = codex
+        self.desktop_refresh = desktop_refresh
         self._pending_inputs: dict[int, str] = {}
         self._thread_choices: dict[int, list[str]] = {}
 
@@ -189,6 +195,20 @@ class BotApplication:
             return self.dispatch("/codex_threads", chat_id), main_keyboard()
         if data == "show:threads":
             return self._show_thread_picker(chat_id)
+        if data == "desktop:refresh":
+            return (
+                "Codex Desktop будет полностью перезапущен. Открытые в нём "
+                "задачи могут прерваться. Продолжить?",
+                desktop_refresh_keyboard(),
+            )
+        if data == "desktop:refresh_confirm":
+            if self.desktop_refresh is None:
+                return "Перезапуск Codex Desktop не настроен.", main_keyboard()
+            try:
+                return self.desktop_refresh(), main_keyboard()
+            except DesktopRefreshError as exc:
+                LOG.warning("Не удалось перезапустить Codex Desktop: %s", exc)
+                return f"Не удалось обновить Codex Desktop: {exc}", main_keyboard()
         if data == "action:stop":
             return self.dispatch("/codex_stop", chat_id), main_keyboard()
         if data == "action:cancel":
@@ -456,6 +476,7 @@ def build_application(config: AppConfig) -> BotApplication:
         config=config,
         client=client,
         codex=codex,
+        desktop_refresh=refresh_codex_desktop,
     )
     codex.notify_user = application.send_codex_notification
     return application

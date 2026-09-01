@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
-from .codex import CodexError, CodexManager, CodexStatus
+from .codex import CodexError, CodexManager, CodexStatus, CodexThreadSummary
 from .config import AppConfig
 from .storage import Storage
 from .telegram import TelegramClient, TelegramConnectionError, TelegramError
@@ -18,6 +19,13 @@ from .ui import (
 
 
 LOG = logging.getLogger(__name__)
+
+CONNECTOR_LINK_RE = re.compile(
+    r"\[@?([^\]]+)\]\((?:plugin|app)://[^)]+\)\s*:?\s*",
+    re.IGNORECASE,
+)
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+RAW_URL_RE = re.compile(r"(?:plugin|app|https?)://\S+", re.IGNORECASE)
 
 HELP_TEXT = """Управление Codex через Telegram.
 
@@ -214,10 +222,49 @@ class BotApplication:
         labels: list[str] = []
         lines = ["Выберите задачу:"]
         for index, item in enumerate(threads, 1):
-            label = (item.name or item.preview or item.thread_id).replace("\n", " ").strip()
+            label = self._thread_display_name(item)
             labels.append(label)
-            lines.append(f"{index}. {label[:80]} — {item.status}")
+            lines.append(f"{index}. {label} — {self._thread_status_name(item.status)}")
         return "\n".join(lines), thread_keyboard(labels)
+
+    @classmethod
+    def _thread_display_name(cls, item: CodexThreadSummary) -> str:
+        name = cls._clean_thread_text(item.name)
+        if name and name.casefold() != "без названия":
+            return cls._shorten_thread_name(name)
+        preview = cls._clean_thread_text(item.preview)
+        if preview:
+            return cls._shorten_thread_name(preview)
+        return f"Задача {item.thread_id[:8]}"
+
+    @staticmethod
+    def _clean_thread_text(value: str) -> str:
+        text = CONNECTOR_LINK_RE.sub(lambda match: f"{match.group(1).strip()} — ", value)
+        text = MARKDOWN_LINK_RE.sub(lambda match: match.group(1).strip(), text)
+        text = RAW_URL_RE.sub("", text)
+        return " ".join(text.split()).strip(" —:,-")
+
+    @staticmethod
+    def _shorten_thread_name(value: str, limit: int = 44) -> str:
+        if len(value) <= limit:
+            return value
+        candidate = value[: limit - 1].rsplit(" ", 1)[0].rstrip(" —:,-")
+        if len(candidate) < limit // 2:
+            candidate = value[: limit - 1].rstrip(" —:,-")
+        return candidate + "…"
+
+    @staticmethod
+    def _thread_status_name(status: str) -> str:
+        names = {
+            "notLoaded": "не подключена",
+            "idle": "ожидает",
+            "loaded": "готова",
+            "inProgress": "выполняется",
+            "completed": "завершена",
+            "interrupted": "остановлена",
+            "failed": "ошибка",
+        }
+        return names.get(status, status)
 
     def send_codex_notification(self, chat_id: int, text: str) -> None:
         self.client.send_message(
@@ -306,13 +353,20 @@ class BotApplication:
                 return "Задачи Codex не найдены."
             lines = ["Последние задачи Codex:"]
             for item in threads:
-                preview = item.preview.replace("\n", " ").strip()
+                preview = self._clean_thread_text(item.preview)
                 if len(preview) > 120:
                     preview = preview[:117] + "…"
+                display_name = self._thread_display_name(item)
+                display_stem = display_name.removesuffix("…")
+                show_preview = bool(
+                    preview
+                    and preview != display_name
+                    and not preview.startswith(display_stem)
+                )
                 lines.append(
-                    f"\n{item.name}\n{item.thread_id}\n"
-                    f"Статус: {item.status}"
-                    + (f"\n{preview}" if preview else "")
+                    f"\n{display_name}\n{item.thread_id}\n"
+                    f"Статус: {self._thread_status_name(item.status)}"
+                    + (f"\n{preview}" if show_preview else "")
                 )
             lines.append("\nПодключение: /codex_use ID")
             return "\n".join(lines)

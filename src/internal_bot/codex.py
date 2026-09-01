@@ -550,7 +550,7 @@ class CodexManager:
             summaries.append(
                 CodexThreadSummary(
                     thread_id=row["id"],
-                    name=str(row.get("name") or "Без названия"),
+                    name=str(row.get("name") or ""),
                     preview=str(row.get("preview") or ""),
                     status=status_text,
                     cwd=str(row.get("cwd") or ""),

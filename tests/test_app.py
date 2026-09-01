@@ -54,7 +54,22 @@ class FakeCodex:
                 "Исправить ошибки",
                 "idle",
                 "C:/project",
-            )
+            ),
+            CodexThreadSummary(
+                "thr_without_name",
+                "",
+                "Описание задачи без отдельного заголовка",
+                "idle",
+                "C:/project",
+            ),
+            CodexThreadSummary(
+                "thr_google_drive",
+                "Без названия",
+                "[@Google Drive](plugin://google-drive@openai-curated-remote): "
+                "проанализируй последние документы и подготовь краткий отчёт",
+                "notLoaded",
+                "C:/project",
+            ),
         ][:limit]
 
     def use_thread(self, chat_id: int, thread_id: str) -> CodexStatus:
@@ -182,6 +197,28 @@ class AppTests(unittest.TestCase):
 
         self.assertIn("Последние задачи Codex", response)
         self.assertIn("thr_old", response)
+        self.assertIn("Описание задачи без отдельного заголовка", response)
+        self.assertIn("Google Drive — проанализируй последние…", response)
+        self.assertIn("Статус: не подключена", response)
+        self.assertNotIn("plugin://", response)
+        self.assertNotIn("Без названия", response)
+
+    def test_thread_picker_uses_preview_when_name_is_missing(self) -> None:
+        response, markup = self.app.dispatch_callback("show:threads", 10)
+
+        self.assertIn("Описание задачи без отдельного заголовка", response)
+        self.assertEqual(
+            markup["inline_keyboard"][1][0]["text"],
+            "2. Описание задачи без отдельного заголовка",
+        )
+        self.assertIn(
+            "3. Google Drive — проанализируй последние… — не подключена",
+            response,
+        )
+        self.assertEqual(
+            markup["inline_keyboard"][2][0]["text"],
+            "3. Google Drive — проанализируй последние…",
+        )
 
     def test_rejects_button_from_unknown_user(self) -> None:
         self.app.handle_update(

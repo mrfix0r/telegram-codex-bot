@@ -26,6 +26,8 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(config.token, "test:secret-token")
             self.assertEqual(config.owner_ids, frozenset({7}))
+            self.assertTrue(config.codex_enabled)
+            self.assertEqual(config.codex_approval_policy, "unlessTrusted")
 
     def test_process_environment_has_priority_over_secret_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -40,6 +42,21 @@ class ConfigTests(unittest.TestCase):
                 config = AppConfig.from_env(root)
 
             self.assertEqual(config.token, "process:token")
+
+    def test_rejects_invalid_codex_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".env").write_text("TELEGRAM_OWNER_IDS=7\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "TELEGRAM_BOT_TOKEN": "process:token",
+                    "BOT_CODEX_ENABLED": "sometimes",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "BOT_CODEX_ENABLED"):
+                    AppConfig.from_env(root)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -13,22 +15,39 @@ class StorageTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_note_lifecycle(self) -> None:
-        note_id = self.storage.add_note("Важная мысль")
-        self.assertGreater(note_id, 0)
-        self.assertEqual(self.storage.list_notes()[0].text, "Важная мысль")
+    def test_new_database_only_contains_codex_sessions(self) -> None:
+        with closing(sqlite3.connect(self.storage.db_path)) as connection:
+            names = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertEqual(names, {"codex_sessions"})
 
-    def test_todo_lifecycle_and_stats(self) -> None:
-        todo_id = self.storage.add_todo("Проверить отчёт")
-        self.assertEqual([item.id for item in self.storage.list_todos()], [todo_id])
-        self.assertTrue(self.storage.complete_todo(todo_id))
-        self.assertFalse(self.storage.complete_todo(todo_id))
-        self.assertEqual(self.storage.list_todos(), [])
-        self.assertEqual(self.storage.stats()["done_todos"], 1)
+    def test_codex_session_is_upserted(self) -> None:
+        self.storage.save_codex_session(
+            chat_id=10,
+            thread_id="thr_1",
+            status="inProgress",
+            last_turn_id="turn_1",
+            last_response="",
+            last_error="",
+        )
+        self.storage.save_codex_session(
+            chat_id=10,
+            thread_id="thr_1",
+            status="completed",
+            last_turn_id=None,
+            last_response="Готово",
+            last_error="",
+        )
 
-    def test_empty_text_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            self.storage.add_note("   ")
+        records = self.storage.list_codex_sessions()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "completed")
+        self.assertEqual(records[0].last_response, "Готово")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,0 @@
-{
-  "git-status": {
-    "description": "Показать состояние Git-репозитория",
-    "command": ["git", "status", "--short"],
-    "cwd": ".",
-    "timeout_seconds": 15,
-    "accepts_arguments": false
-  }
-}

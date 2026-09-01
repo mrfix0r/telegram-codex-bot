@@ -1,51 +1,30 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone, tzinfo
 import logging
-from pathlib import Path
-import platform
 import time
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .actions import ActionRegistry
+from .codex import CodexError, CodexManager, CodexStatus
 from .config import AppConfig
 from .storage import Storage
-from .telegram import TelegramClient, TelegramError
+from .telegram import TelegramClient, TelegramConnectionError, TelegramError
 
 
 LOG = logging.getLogger(__name__)
 
-HELP_TEXT = """Внутренний инструмент готов к работе.
+HELP_TEXT = """Управление Codex через Telegram.
 
-/todo текст — добавить задачу
-/todos — показать открытые задачи
-/todos all — показать все задачи
-/done ID — завершить задачу
-/note текст — сохранить заметку
-/notes [число] — последние заметки
-/actions — разрешённые действия
-/run имя [аргументы] — запустить действие
-/reload — перечитать actions.json
-/status — состояние инструмента
-/ping — проверка связи
+/codex запрос — создать или продолжить задачу Codex
+/codex_new запрос — создать новую задачу Codex
+/codex_reply текст — направить выполняемую задачу
+/codex_status — статус и последний результат Codex
+/codex_threads — последние задачи Codex
+/codex_use ID — подключить существующую задачу
+/codex_stop — остановить текущую задачу Codex
+/codex_approve — подтвердить действие Codex один раз
+/codex_decline — отклонить действие Codex
+/codex_answer текст — ответить на вопрос Codex
 /help — эта справка"""
-
-
-def resolve_timezone(name: str) -> tzinfo:
-    """Возвращает часовой пояс даже на Windows без установленного пакета tzdata."""
-    try:
-        return ZoneInfo(name)
-    except ZoneInfoNotFoundError:
-        normalized = name.strip().lower()
-        if normalized in {"europe/moscow", "msk"}:
-            LOG.warning(
-                "База часовых поясов не найдена; для %s используется фиксированный UTC+03:00",
-                name,
-            )
-            return timezone(timedelta(hours=3), name="MSK")
-        LOG.warning("Часовой пояс %s не найден, используется UTC", name)
-        return timezone.utc
 
 
 def parse_command(text: str) -> tuple[str, str]:
@@ -62,15 +41,11 @@ class BotApplication:
         self,
         config: AppConfig,
         client: TelegramClient,
-        storage: Storage,
-        actions: ActionRegistry,
+        codex: CodexManager | None = None,
     ) -> None:
         self.config = config
         self.client = client
-        self.storage = storage
-        self.actions = actions
-        self.started_at = time.monotonic()
-        self.timezone = resolve_timezone(config.timezone)
+        self.codex = codex
 
     def authorized(self, user_id: int, chat_id: int) -> bool:
         return user_id in self.config.owner_ids and (
@@ -94,126 +69,183 @@ class BotApplication:
             return
 
         try:
-            response = self.dispatch(text)
+            response = self.dispatch(text, chat_id=chat_id)
         except Exception:
             LOG.exception("Ошибка обработки команды")
             response = "Команда завершилась внутренней ошибкой. Подробности записаны в лог."
         self.client.send_message(chat_id, response)
 
-    def dispatch(self, text: str) -> str:
+    def dispatch(self, text: str, chat_id: int | None = None) -> str:
         command, args = parse_command(text)
         if not command:
             return "Команды начинаются с /. Отправьте /help для списка."
         if command in {"start", "help"}:
             return HELP_TEXT
-        if command == "ping":
-            return "pong"
-        if command == "todo":
-            if not args:
-                return "Использование: /todo текст задачи"
-            todo_id = self.storage.add_todo(args)
-            return f"Задача #{todo_id} добавлена."
-        if command == "todos":
-            items = self.storage.list_todos(include_done=args.lower() == "all")
-            if not items:
-                return "Задач пока нет."
-            lines = ["Задачи:"]
-            for item in items:
-                mark = "✓" if item.done else "○"
-                lines.append(f"{mark} #{item.id} {item.text}")
-            return "\n".join(lines)
-        if command == "done":
+        if command in {
+            "codex",
+            "codex_new",
+            "codex_reply",
+            "codex_status",
+            "codex_threads",
+            "codex_use",
+            "codex_stop",
+            "codex_approve",
+            "codex_decline",
+            "codex_answer",
+        }:
+            if chat_id is None:
+                return "Команда Codex доступна только из Telegram-чата."
             try:
-                todo_id = int(args)
-            except ValueError:
-                return "Использование: /done ID"
-            return (
-                f"Задача #{todo_id} завершена."
-                if self.storage.complete_todo(todo_id)
-                else f"Открытая задача #{todo_id} не найдена."
-            )
-        if command == "note":
+                return self._dispatch_codex(command, args, chat_id)
+            except CodexError as exc:
+                return f"Codex: {exc}"
+        return "Неизвестная команда. Отправьте /help."
+
+    def _dispatch_codex(self, command: str, args: str, chat_id: int) -> str:
+        if self.codex is None:
+            raise CodexError("интеграция не настроена")
+        if command in {"codex", "codex_new"}:
             if not args:
-                return "Использование: /note текст заметки"
-            note_id = self.storage.add_note(args)
-            return f"Заметка #{note_id} сохранена."
-        if command == "notes":
+                return f"Использование: /{command} текст задачи"
+            status = self.codex.start_task(
+                chat_id, args, new_thread=command == "codex_new"
+            )
+            return (
+                "Задача Codex запущена. Итог придёт отдельным сообщением.\n"
+                f"Thread ID: {status.thread_id}"
+            )
+        if command == "codex_reply":
+            if not args:
+                return "Использование: /codex_reply текст"
+            status = self.codex.continue_task(chat_id, args)
+            return (
+                "Сообщение передано Codex.\n"
+                f"Thread ID: {status.thread_id}"
+            )
+        if command == "codex_status":
+            return self._format_codex_status(self.codex.status(chat_id))
+        if command == "codex_stop":
+            self.codex.stop_task(chat_id)
+            return "Запрос на остановку задачи Codex отправлен."
+        if command == "codex_approve":
+            mode = args.lower() or "once"
+            if mode not in {"once", "session"}:
+                return "Использование: /codex_approve [once|session]"
+            self.codex.approve(chat_id, for_session=mode == "session")
+            return (
+                "Действие Codex разрешено для текущей сессии."
+                if mode == "session"
+                else "Действие Codex разрешено один раз."
+            )
+        if command == "codex_decline":
+            self.codex.decline(chat_id)
+            return "Действие Codex отклонено."
+        if command == "codex_answer":
+            if not args:
+                return "Использование: /codex_answer текст ответа"
+            self.codex.answer(chat_id, args)
+            return "Ответ передан Codex."
+        if command == "codex_threads":
             try:
                 limit = int(args) if args else 10
             except ValueError:
-                return "Использование: /notes [число от 1 до 50]"
-            items = self.storage.list_notes(limit)
-            if not items:
-                return "Заметок пока нет."
-            return "Последние заметки:\n" + "\n".join(
-                f"#{item.id} {item.text}" for item in items
-            )
-        if command == "actions":
-            actions = self.actions.list()
-            if not actions:
-                return "Действия не настроены. Скопируйте actions.json.example в actions.json."
-            return "Доступные действия:\n" + "\n".join(
-                f"/run {item.name} — {item.description}" for item in actions
-            )
-        if command == "reload":
-            self.actions.reload()
-            return f"Конфигурация перечитана. Действий: {len(self.actions.list())}."
-        if command == "run":
-            name, _, action_args = args.partition(" ")
-            if not name:
-                return "Использование: /run имя [аргументы]"
-            try:
-                result = self.actions.run(name, action_args)
-            except KeyError:
-                return f"Действие {name!r} не найдено. Отправьте /actions."
-            except ValueError as exc:
-                return str(exc)
-            output = result.output or "(действие не вернуло текст)"
-            if result.timed_out:
-                return f"Действие {result.name} остановлено по таймауту.\n\n{output}"
-            state = "успешно" if result.ok else f"с кодом {result.exit_code}"
-            return f"Действие {result.name} завершено {state}.\n\n{output}"
-        if command == "status":
-            stats = self.storage.stats()
-            uptime = int(time.monotonic() - self.started_at)
-            now = datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S %Z")
-            return (
-                "Инструмент работает.\n"
-                f"Время: {now}\n"
-                f"Uptime: {uptime // 3600}ч {(uptime % 3600) // 60}м\n"
-                f"Заметок: {stats['notes']}\n"
-                f"Открытых задач: {stats['open_todos']}\n"
-                f"Завершённых задач: {stats['done_todos']}\n"
-                f"Действий: {len(self.actions.list())}\n"
-                f"Python: {platform.python_version()}"
-            )
-        return "Неизвестная команда. Отправьте /help."
+                return "Использование: /codex_threads [число от 1 до 20]"
+            threads = self.codex.list_threads(limit)
+            if not threads:
+                return "Задачи Codex не найдены."
+            lines = ["Последние задачи Codex:"]
+            for item in threads:
+                preview = item.preview.replace("\n", " ").strip()
+                if len(preview) > 120:
+                    preview = preview[:117] + "…"
+                lines.append(
+                    f"\n{item.name}\n{item.thread_id}\n"
+                    f"Статус: {item.status}"
+                    + (f"\n{preview}" if preview else "")
+                )
+            lines.append("\nПодключение: /codex_use ID")
+            return "\n".join(lines)
+        if command == "codex_use":
+            if not args:
+                return "Использование: /codex_use ID"
+            status = self.codex.use_thread(chat_id, args)
+            return f"Задача Codex подключена.\nThread ID: {status.thread_id}"
+        raise CodexError("неизвестная команда")
+
+    @staticmethod
+    def _format_codex_status(status: CodexStatus) -> str:
+        if status.thread_id is None:
+            return "Задача Codex ещё не выбрана. Используйте /codex или /codex_threads."
+        names = {
+            "idle": "ожидает нового запроса",
+            "inProgress": "выполняется",
+            "completed": "завершена",
+            "interrupted": "остановлена",
+            "failed": "ошибка",
+        }
+        lines = [
+            f"Codex: {names.get(status.status, status.status)}",
+            f"Thread ID: {status.thread_id}",
+        ]
+        if status.turn_id:
+            lines.append(f"Turn ID: {status.turn_id}")
+        if status.pending_requests:
+            lines.append(f"Ожидает ответов/подтверждений: {status.pending_requests}")
+        if status.last_error:
+            lines.append(f"Ошибка: {status.last_error}")
+        if status.last_response:
+            preview = status.last_response[-1500:]
+            lines.append("Последний ответ:\n" + preview)
+        return "\n".join(lines)
 
     def run_forever(self) -> None:
         self.client.prepare()
         LOG.info("Бот запущен; владельцы: %s", sorted(self.config.owner_ids))
         offset: int | None = None
         retry_delay = 1
-        while True:
-            try:
-                updates = self.client.get_updates(offset, self.config.poll_timeout)
-                retry_delay = 1
-                for update in updates:
-                    update_id = update.get("update_id")
-                    if isinstance(update_id, int):
-                        offset = update_id + 1
-                    self.handle_update(update)
-            except TelegramError as exc:
-                LOG.error("%s; повтор через %s сек.", exc, retry_delay)
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 30)
+        try:
+            while True:
+                try:
+                    updates = self.client.get_updates(offset, self.config.poll_timeout)
+                    retry_delay = 1
+                    for update in updates:
+                        update_id = update.get("update_id")
+                        if isinstance(update_id, int):
+                            offset = update_id + 1
+                        self.handle_update(update)
+                except TelegramConnectionError as exc:
+                    LOG.warning(
+                        "%s; это временный сетевой сбой, повтор через %s сек.",
+                        exc,
+                        retry_delay,
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 30)
+                except TelegramError as exc:
+                    LOG.error("%s; повтор через %s сек.", exc, retry_delay)
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 30)
+        finally:
+            if self.codex is not None:
+                self.codex.close()
 
 
 def build_application(config: AppConfig) -> BotApplication:
     config.data_dir.mkdir(parents=True, exist_ok=True)
+    client = TelegramClient(config.token)
+    storage = Storage(config.data_dir / "bot.db")
+    codex = CodexManager(
+        storage=storage,
+        notify_user=client.send_message,
+        enabled=config.codex_enabled,
+        executable=config.codex_executable,
+        workspace=config.codex_workspace,
+        model=config.codex_model,
+        approval_policy=config.codex_approval_policy,
+        request_timeout=config.codex_request_timeout,
+    )
     return BotApplication(
         config=config,
-        client=TelegramClient(config.token),
-        storage=Storage(config.data_dir / "bot.db"),
-        actions=ActionRegistry(config.actions_file, config.workspace_root),
+        client=client,
+        codex=codex,
     )

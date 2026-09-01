@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-internal-tool"
-version = "0.1.0"
-description = "Private Telegram command bot for notes, tasks and allow-listed actions"
+version = "0.2.0"
+description = "Private Telegram controller for local Codex tasks"
 requires-python = ">=3.11"
 dependencies = []
 

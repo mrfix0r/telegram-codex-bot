@@ -9,19 +9,14 @@ import sqlite3
 
 
 @dataclass(frozen=True, slots=True)
-class Note:
-    id: int
-    text: str
-    created_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class Todo:
-    id: int
-    text: str
-    done: bool
-    created_at: str
-    completed_at: str | None
+class CodexSessionRecord:
+    chat_id: int
+    thread_id: str
+    status: str
+    last_turn_id: str | None
+    last_response: str
+    last_error: str
+    updated_at: str
 
 
 class Storage:
@@ -46,17 +41,14 @@ class Storage:
             db.executescript(
                 """
                 PRAGMA journal_mode = WAL;
-                CREATE TABLE IF NOT EXISTS notes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS todos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text TEXT NOT NULL,
-                    done INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)),
-                    created_at TEXT NOT NULL,
-                    completed_at TEXT
+                CREATE TABLE IF NOT EXISTS codex_sessions (
+                    chat_id INTEGER PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    last_turn_id TEXT,
+                    last_response TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -65,78 +57,56 @@ class Storage:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    @staticmethod
-    def _clean_text(text: str) -> str:
-        value = text.strip()
-        if not value:
-            raise ValueError("Текст не может быть пустым")
-        if len(value) > 4000:
-            raise ValueError("Текст слишком длинный (максимум 4000 символов)")
-        return value
-
-    def add_note(self, text: str) -> int:
-        value = self._clean_text(text)
+    def save_codex_session(
+        self,
+        *,
+        chat_id: int,
+        thread_id: str,
+        status: str,
+        last_turn_id: str | None,
+        last_response: str,
+        last_error: str,
+    ) -> None:
         with self._connect() as db:
-            cursor = db.execute(
-                "INSERT INTO notes(text, created_at) VALUES (?, ?)",
-                (value, self._now()),
+            db.execute(
+                """INSERT INTO codex_sessions(
+                       chat_id, thread_id, status, last_turn_id,
+                       last_response, last_error, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET
+                       thread_id = excluded.thread_id,
+                       status = excluded.status,
+                       last_turn_id = excluded.last_turn_id,
+                       last_response = excluded.last_response,
+                       last_error = excluded.last_error,
+                       updated_at = excluded.updated_at""",
+                (
+                    chat_id,
+                    thread_id,
+                    status,
+                    last_turn_id,
+                    last_response,
+                    last_error,
+                    self._now(),
+                ),
             )
-            return int(cursor.lastrowid)
 
-    def list_notes(self, limit: int = 10) -> list[Note]:
-        limit = max(1, min(limit, 50))
+    def list_codex_sessions(self) -> list[CodexSessionRecord]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT id, text, created_at FROM notes ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
-        return [Note(int(row["id"]), row["text"], row["created_at"]) for row in rows]
-
-    def add_todo(self, text: str) -> int:
-        value = self._clean_text(text)
-        with self._connect() as db:
-            cursor = db.execute(
-                "INSERT INTO todos(text, created_at) VALUES (?, ?)",
-                (value, self._now()),
-            )
-            return int(cursor.lastrowid)
-
-    def list_todos(self, include_done: bool = False, limit: int = 50) -> list[Todo]:
-        condition = "" if include_done else "WHERE done = 0"
-        limit = max(1, min(limit, 100))
-        with self._connect() as db:
-            rows = db.execute(
-                f"""SELECT id, text, done, created_at, completed_at
-                    FROM todos {condition}
-                    ORDER BY done ASC, id DESC LIMIT ?""",
-                (limit,),
+                """SELECT chat_id, thread_id, status, last_turn_id,
+                          last_response, last_error, updated_at
+                   FROM codex_sessions ORDER BY updated_at DESC"""
             ).fetchall()
         return [
-            Todo(
-                id=int(row["id"]),
-                text=row["text"],
-                done=bool(row["done"]),
-                created_at=row["created_at"],
-                completed_at=row["completed_at"],
+            CodexSessionRecord(
+                chat_id=int(row["chat_id"]),
+                thread_id=row["thread_id"],
+                status=row["status"],
+                last_turn_id=row["last_turn_id"],
+                last_response=row["last_response"],
+                last_error=row["last_error"],
+                updated_at=row["updated_at"],
             )
             for row in rows
         ]
-
-    def complete_todo(self, todo_id: int) -> bool:
-        with self._connect() as db:
-            cursor = db.execute(
-                """UPDATE todos SET done = 1, completed_at = ?
-                   WHERE id = ? AND done = 0""",
-                (self._now(), todo_id),
-            )
-            return cursor.rowcount > 0
-
-    def stats(self) -> dict[str, int]:
-        with self._connect() as db:
-            note_count = int(db.execute("SELECT COUNT(*) FROM notes").fetchone()[0])
-            open_count = int(
-                db.execute("SELECT COUNT(*) FROM todos WHERE done = 0").fetchone()[0]
-            )
-            done_count = int(
-                db.execute("SELECT COUNT(*) FROM todos WHERE done = 1").fetchone()[0]
-            )
-        return {"notes": note_count, "open_todos": open_count, "done_todos": done_count}

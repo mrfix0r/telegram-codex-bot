@@ -8,11 +8,20 @@ from .codex import CodexError, CodexManager, CodexStatus
 from .config import AppConfig
 from .storage import Storage
 from .telegram import TelegramClient, TelegramConnectionError, TelegramError
+from .ui import (
+    ReplyMarkup,
+    cancel_keyboard,
+    main_keyboard,
+    notification_keyboard,
+    thread_keyboard,
+)
 
 
 LOG = logging.getLogger(__name__)
 
 HELP_TEXT = """Управление Codex через Telegram.
+
+Выберите действие кнопкой под сообщением. Текст задачи бот запросит следующим сообщением.
 
 /codex запрос — создать или продолжить задачу Codex
 /codex_new запрос — создать новую задачу Codex
@@ -25,6 +34,19 @@ HELP_TEXT = """Управление Codex через Telegram.
 /codex_decline — отклонить действие Codex
 /codex_answer текст — ответить на вопрос Codex
 /help — эта справка"""
+
+PROMPT_COMMANDS = {
+    "prompt:codex": (
+        "codex",
+        "Напишите, что нужно сделать. Codex продолжит выбранную задачу или создаст новую.",
+    ),
+    "prompt:codex_new": ("codex_new", "Напишите текст новой задачи Codex."),
+    "prompt:codex_reply": (
+        "codex_reply",
+        "Напишите уточнение или следующую инструкцию для выбранной задачи.",
+    ),
+    "prompt:codex_answer": ("codex_answer", "Напишите ответ на вопрос Codex."),
+}
 
 
 def parse_command(text: str) -> tuple[str, str]:
@@ -46,6 +68,8 @@ class BotApplication:
         self.config = config
         self.client = client
         self.codex = codex
+        self._pending_inputs: dict[int, str] = {}
+        self._thread_choices: dict[int, list[str]] = {}
 
     def authorized(self, user_id: int, chat_id: int) -> bool:
         return user_id in self.config.owner_ids and (
@@ -53,6 +77,11 @@ class BotApplication:
         )
 
     def handle_update(self, update: dict[str, Any]) -> None:
+        callback_query = update.get("callback_query")
+        if isinstance(callback_query, dict):
+            self._handle_callback_query(callback_query)
+            return
+
         message = update.get("message")
         if not isinstance(message, dict):
             return
@@ -69,16 +98,127 @@ class BotApplication:
             return
 
         try:
-            response = self.dispatch(text, chat_id=chat_id)
+            command, _ = parse_command(text)
+            if command:
+                self._pending_inputs.pop(chat_id, None)
+                response = self.dispatch(text, chat_id=chat_id)
+            else:
+                pending_command = self._pending_inputs.pop(chat_id, None)
+                if pending_command:
+                    response = self.dispatch(
+                        f"/{pending_command} {text}",
+                        chat_id=chat_id,
+                    )
+                else:
+                    response = "Выберите действие кнопкой под сообщением."
         except Exception:
             LOG.exception("Ошибка обработки команды")
             response = "Команда завершилась внутренней ошибкой. Подробности записаны в лог."
-        self.client.send_message(chat_id, response)
+        self.client.send_message(chat_id, response, reply_markup=main_keyboard())
+
+    def _handle_callback_query(self, query: dict[str, Any]) -> None:
+        callback_id = query.get("id")
+        data = query.get("data")
+        sender = query.get("from") or {}
+        message = query.get("message") or {}
+        chat = message.get("chat") or {}
+        if not isinstance(callback_id, str):
+            return
+        if not isinstance(data, str) or not isinstance(chat.get("id"), int):
+            self.client.answer_callback_query(
+                callback_id,
+                "Кнопка больше недоступна.",
+                show_alert=True,
+            )
+            return
+
+        chat_id = int(chat["id"])
+        user_id = sender.get("id")
+        if not isinstance(user_id, int) or not self.authorized(user_id, chat_id):
+            LOG.warning("Отклонена кнопка user_id=%r chat_id=%r", user_id, chat_id)
+            self.client.answer_callback_query(
+                callback_id,
+                "Доступ запрещён.",
+                show_alert=True,
+            )
+            return
+
+        self.client.answer_callback_query(callback_id)
+        try:
+            response, reply_markup = self.dispatch_callback(data, chat_id)
+        except CodexError as exc:
+            response, reply_markup = f"Codex: {exc}", main_keyboard()
+        except Exception:
+            LOG.exception("Ошибка обработки кнопки")
+            response = "Действие завершилось внутренней ошибкой. Подробности записаны в лог."
+            reply_markup = main_keyboard()
+        self.client.send_message(chat_id, response, reply_markup=reply_markup)
+
+    def dispatch_callback(self, data: str, chat_id: int) -> tuple[str, ReplyMarkup]:
+        prompt = PROMPT_COMMANDS.get(data)
+        if prompt is not None:
+            command, text = prompt
+            self._pending_inputs[chat_id] = command
+            return text, cancel_keyboard()
+
+        self._pending_inputs.pop(chat_id, None)
+        if data == "show:menu":
+            return "Что сделать с Codex?", main_keyboard()
+        if data == "show:help":
+            return HELP_TEXT, main_keyboard()
+        if data == "show:status":
+            return self.dispatch("/codex_status", chat_id), main_keyboard()
+        if data == "show:threads":
+            return self._show_thread_picker(chat_id)
+        if data == "action:stop":
+            return self.dispatch("/codex_stop", chat_id), main_keyboard()
+        if data == "action:cancel":
+            return "Ввод отменён.", main_keyboard()
+        if data == "approve:once":
+            return self.dispatch("/codex_approve", chat_id), main_keyboard()
+        if data == "approve:session":
+            return self.dispatch("/codex_approve session", chat_id), main_keyboard()
+        if data == "approve:decline":
+            return self.dispatch("/codex_decline", chat_id), main_keyboard()
+        if data.startswith("thread:"):
+            try:
+                index = int(data.partition(":")[2])
+                thread_id = self._thread_choices[chat_id][index]
+            except (KeyError, IndexError, ValueError):
+                return (
+                    "Этот список задач устарел. Откройте список ещё раз.",
+                    main_keyboard(),
+                )
+            response = self.dispatch(f"/codex_use {thread_id}", chat_id)
+            return response, main_keyboard()
+        return "Неизвестная кнопка. Откройте главное меню.", main_keyboard()
+
+    def _show_thread_picker(self, chat_id: int) -> tuple[str, ReplyMarkup]:
+        if self.codex is None:
+            raise CodexError("интеграция не настроена")
+        threads = self.codex.list_threads(10)
+        if not threads:
+            return "Задачи Codex не найдены.", main_keyboard()
+        self._thread_choices[chat_id] = [item.thread_id for item in threads]
+        labels: list[str] = []
+        lines = ["Выберите задачу:"]
+        for index, item in enumerate(threads, 1):
+            label = (item.name or item.preview or item.thread_id).replace("\n", " ").strip()
+            labels.append(label)
+            lines.append(f"{index}. {label[:80]} — {item.status}")
+        return "\n".join(lines), thread_keyboard(labels)
+
+    def send_codex_notification(self, chat_id: int, text: str) -> None:
+        self.client.send_message(
+            chat_id,
+            text,
+            reply_markup=notification_keyboard(text),
+        )
 
     def dispatch(self, text: str, chat_id: int | None = None) -> str:
         command, args = parse_command(text)
         if not command:
-            return "Команды начинаются с /. Отправьте /help для списка."
+            return "Выберите действие кнопкой или отправьте /help."
         if command in {"start", "help"}:
             return HELP_TEXT
         if command in {
@@ -244,8 +384,10 @@ def build_application(config: AppConfig) -> BotApplication:
         approval_policy=config.codex_approval_policy,
         request_timeout=config.codex_request_timeout,
     )
-    return BotApplication(
+    application = BotApplication(
         config=config,
         client=client,
         codex=codex,
     )
+    codex.notify_user = application.send_codex_notification
+    return application

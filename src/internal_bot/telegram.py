@@ -90,7 +90,7 @@ class TelegramClient:
     def get_updates(self, offset: int | None, poll_timeout: int) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": poll_timeout,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         }
         if offset is not None:
             payload["offset"] = offset
@@ -102,16 +102,37 @@ class TelegramClient:
         )
         return result if isinstance(result, list) else []
 
-    def send_message(self, chat_id: int, text: str) -> None:
-        for chunk in split_message(text):
-            self.call(
-                "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "disable_web_page_preview": True,
-                },
-            )
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        chunks = split_message(text)
+        for index, chunk in enumerate(chunks):
+            payload: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": chunk,
+                "disable_web_page_preview": True,
+            }
+            if reply_markup is not None and index == len(chunks) - 1:
+                payload["reply_markup"] = reply_markup
+            self.call("sendMessage", payload)
+
+    def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str | None = None,
+        *,
+        show_alert: bool = False,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "callback_query_id": callback_query_id,
+            "show_alert": show_alert,
+        }
+        if text:
+            payload["text"] = text
+        self.call("answerCallbackQuery", payload, retries=1)
 
     def prepare(self) -> None:
         self.call(
